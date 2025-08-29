@@ -1,3 +1,4 @@
+// index.js
 const express = require("express");
 const { PrismaClient } = require("@prisma/client");
 const bcrypt = require("bcrypt");
@@ -9,11 +10,11 @@ const prisma = new PrismaClient();
 
 const JWT_SECRET = process.env.JWT_SECRET || "secretkey";
 
-// --- CORS ---
-const allowedOrigin = process.env.FRONTEND_ORIGIN; 
+/* -------------------------------- CORS ---------------------------------- */
+const allowedOrigin = process.env.FRONTEND_ORIGIN; // 예: https://sclab-seat-reservation-front.onrender.com
 app.use(
   cors({
-    origin: allowedOrigin ? [allowedOrigin] : true,
+    origin: allowedOrigin ? [allowedOrigin] : true, // 운영은 도메인 고정 권장
     methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: false,
@@ -22,7 +23,7 @@ app.use(
 
 app.use(express.json());
 
-// ---------- 과정 정규화 ----------
+/* ------------------------------ 유틸 함수 ------------------------------- */
 const COURSE_MAP = {
   "학부연구생": "UNDERGRAD",
   "석사과정": "MASTER",
@@ -37,30 +38,31 @@ const COURSE_MAP = {
 };
 function normalizeCourse(raw) {
   if (!raw) return null;
-  const trimmed = String(raw).trim();
-  const compact = trimmed.replace(/\s+/g, "");
-  const upper = compact.toUpperCase();
-  if (COURSE_MAP[trimmed]) return COURSE_MAP[trimmed];
-  if (COURSE_MAP[compact]) return COURSE_MAP[compact];
-  if (COURSE_MAP[upper]) return COURSE_MAP[upper];
-  const lower = trimmed.toLowerCase();
-  if (lower.includes("학부") || lower.includes("undergrad")) return "UNDERGRAD";
-  if (lower.includes("석사") || lower.includes("master")) return "MASTER";
-  if (lower.includes("박사과정") || lower.includes("phd")) return "PHD";
-  if (lower.includes("박사") || lower.includes("doctor")) return "DOCTOR";
-  if (lower.includes("교수") || lower.includes("prof")) return "PROFESSOR";
+  const t = String(raw).trim();
+  const c = t.replace(/\s+/g, "");
+  const u = c.toUpperCase();
+  if (COURSE_MAP[t]) return COURSE_MAP[t];
+  if (COURSE_MAP[c]) return COURSE_MAP[c];
+  if (COURSE_MAP[u]) return COURSE_MAP[u];
+  const l = t.toLowerCase();
+  if (l.includes("학부") || l.includes("undergrad")) return "UNDERGRAD";
+  if (l.includes("석사") || l.includes("master")) return "MASTER";
+  if (l.includes("박사과정") || l.includes("phd")) return "PHD";
+  if (l.includes("박사") || l.includes("doctor")) return "DOCTOR";
+  if (l.includes("교수") || l.includes("prof")) return "PROFESSOR";
   return null;
 }
+const iso = (d) => (d?.toISOString ? d.toISOString() : d);
 
-// ---------- 인증 미들웨어 ----------
+/* ----------------------------- 인증 미들웨어 ---------------------------- */
 function authMiddleware(req, res, next) {
-  const authHeader = req.headers.authorization || req.headers.Authorization;
-  if (!authHeader) {
+  const h = req.headers.authorization || req.headers.Authorization;
+  if (!h) {
     req.user = null;
     req.userId = null;
     return next();
   }
-  const parts = authHeader.split(" ");
+  const parts = h.split(" ");
   if (parts.length !== 2 || parts[0] !== "Bearer") {
     req.user = null;
     req.userId = null;
@@ -77,11 +79,19 @@ function authMiddleware(req, res, next) {
   return next();
 }
 
-// ---------- 회원가입 / 로그인 ----------
+/* ---------------------------- 회원가입 / 로그인 --------------------------- */
 app.post("/signup", async (req, res) => {
   try {
-    let { name = "", studentId = "", email = "", course = "", username, userId, password = "", passwordConfirm } =
-      req.body || {};
+    let {
+      name = "",
+      studentId = "",
+      email = "",
+      course = "",
+      username,
+      userId,
+      password = "",
+      passwordConfirm,
+    } = req.body || {};
 
     const finalUserId = (username ?? userId ?? "").trim();
     if (!finalUserId) return res.status(400).json({ error: "userId(또는 username) 필수" });
@@ -92,9 +102,7 @@ app.post("/signup", async (req, res) => {
     }
 
     const normCourse = normalizeCourse(course);
-    if (!normCourse) {
-      return res.status(400).json({ error: "course 값 불명" });
-    }
+    if (!normCourse) return res.status(400).json({ error: "course 값 불명" });
 
     const hashed = await bcrypt.hash(password, 10);
     const user = await prisma.user.create({
@@ -146,9 +154,10 @@ app.get("/me", authMiddleware, async (req, res) => {
   res.json({ user: u });
 });
 
+/* -------------------------------- 헬스체크 -------------------------------- */
 app.get("/healthz", (_, res) => res.send("ok"));
 
-// ---------- 좌석 ----------
+/* --------------------------------- 좌석 ---------------------------------- */
 app.get("/seats", async (req, res) => {
   const seats = await prisma.seat.findMany({
     where: req.query.room ? { room: String(req.query.room) } : {},
@@ -157,9 +166,11 @@ app.get("/seats", async (req, res) => {
   res.json({ count: seats.length, seats });
 });
 
-// ---------- 예약 ----------
-app.get("/reservations", authMiddleware, async (req, res) => {
+/* -------------------------------- 예약 ----------------------------------- */
+// 프론트 요구: 평평한 형태(room, seat, status, startTime, endTime)
+app.get("/reservations", async (req, res) => {
   const { room, userId, status, from, to, limit, offset } = req.query;
+
   const where = {};
   if (room) where.seat = { room: String(room) };
   if (userId) where.userId = Number(userId);
@@ -178,54 +189,110 @@ app.get("/reservations", authMiddleware, async (req, res) => {
     skip: offset ? Number(offset) : 0,
   });
 
-  const formatted = list.map(r => ({
+  const formatted = list.map((r) => ({
     id: r.id,
-    room: r.seat.room,
-    seat: String(r.seat.seatNumber),
+    room: r.seat?.room ?? null,
+    seat: r.seat ? String(r.seat.seatNumber) : null,
     userId: r.userId,
     status: r.status,
-    startTime: r.startTime,
-    endTime: r.endTime,
+    startTime: iso(r.startTime),
+    endTime: iso(r.endTime),
   }));
   res.json({ count: formatted.length, reservations: formatted });
 });
 
+// 예약 + PIN 발급 (dev=1이면 devPin 포함)
 app.post("/reservations", authMiddleware, async (req, res) => {
   try {
     const authUserId = req.userId || req.body.userId;
     if (!authUserId) return res.status(401).json({ error: "인증된 사용자 필요" });
-    const { seatId, startTime, endTime } = req.body || {};
-    if (!seatId || !startTime || !endTime) return res.status(400).json({ error: "seatId/startTime/endTime 필수" });
 
-    const start = new Date(startTime), end = new Date(endTime);
-    if (isNaN(start) || isNaN(end) || start >= end) return res.status(400).json({ error: "시간 불량" });
+    const { seatId, startTime, endTime } = req.body || {};
+    if (!seatId || !startTime || !endTime) {
+      return res.status(400).json({ error: "seatId/startTime/endTime 필수" });
+    }
+
+    const start = new Date(startTime);
+    const end = new Date(endTime);
+    if (isNaN(start) || isNaN(end) || start >= end) {
+      return res.status(400).json({ error: "시간 형식 불량" });
+    }
 
     const seat = await prisma.seat.findUnique({ where: { id: Number(seatId) } });
     if (!seat) return res.status(404).json({ error: "Seat 없음" });
+    if (seat.fixed) return res.status(400).json({ error: "이 좌석은 고정석(예약불가)입니다." });
 
-    const MS20MIN = 20 * 60 * 1000;
+    // 20분 이상 겹치면 거절 (PENDING, CHECKED_IN 과 충돌)
+    const MS20 = 20 * 60 * 1000;
+    const exist = await prisma.reservation.findMany({
+      where: {
+        seatId: Number(seatId),
+        status: { in: ["PENDING", "CHECKED_IN"] },
+        AND: [{ startTime: { lt: end } }, { endTime: { gt: start } }],
+      },
+    });
+    for (const ex of exist) {
+      const overlapMs = Math.max(
+        0,
+        Math.min(new Date(ex.endTime).getTime(), end.getTime()) -
+          Math.max(new Date(ex.startTime).getTime(), start.getTime())
+      );
+      if (overlapMs >= MS20) {
+        return res.status(409).json({ error: "해당 시간대에 이미 예약이 있어 겹침(20분 이상)으로 예약 불가" });
+      }
+    }
+
+    // PIN 발급
     const pinPlain = String(Math.floor(100000 + Math.random() * 900000));
     const pinHash = await bcrypt.hash(pinPlain, 10);
-    const pinExpiresAt = new Date(start.getTime() + MS20MIN);
+    const pinExpiresAt = new Date(start.getTime() + MS20); // 시작부터 20분 유효
 
-    const result = await prisma.$transaction(async tx => {
-      const r = await tx.reservation.create({ data: { seatId: seat.id, userId: Number(authUserId), startTime: start, endTime: end } });
-      await tx.pin.create({ data: { reservationId: r.id, pinHash, expiresAt: pinExpiresAt } });
+    const created = await prisma.$transaction(async (tx) => {
+      const r = await tx.reservation.create({
+        data: {
+          seatId: seat.id,
+          userId: Number(authUserId),
+          startTime: start,
+          endTime: end,
+        },
+        include: { seat: true },
+      });
+      await tx.pin.create({
+        data: {
+          reservationId: r.id,
+          pinHash,
+          expiresAt: pinExpiresAt,
+        },
+      });
       return r;
     });
 
-    const resp = { message: "예약 생성됨", reservation: result };
-    if (req.query.dev === "1") resp.devPin = pinPlain;
+    // 프론트가 기대하는 평평한 응답
+    const reservationForClient = {
+      id: created.id,
+      seatId: created.seatId,
+      room: created.seat?.room ?? null,
+      seat: created.seat ? String(created.seat.seatNumber) : null,
+      startTime: iso(created.startTime),
+      endTime: iso(created.endTime),
+      status: created.status,
+    };
+
+    const resp = { message: "예약 생성됨", reservation: reservationForClient };
+    const dev = req.query.dev === "1" || req.query.dev === "true";
+    if (dev) resp.devPin = pinPlain;
+
     res.status(201).json(resp);
-  } catch {
+  } catch (err) {
+    console.error("[RESERVE] error:", err);
     res.status(500).json({ error: "서버 오류" });
   }
 });
 
-// ---------- 체크인 ----------
+/* -------------------------------- 체크인 --------------------------------- */
 app.post("/checkin", authMiddleware, async (req, res) => {
   try {
-    const { reservationId, pin } = req.body || {};
+    const { reservationId, pin, userId: bodyUserId } = req.body || {};
     if (!reservationId || !pin) return res.status(400).json({ error: "reservationId/pin 필수" });
 
     const reservation = await prisma.reservation.findUnique({ where: { id: Number(reservationId) } });
@@ -233,76 +300,118 @@ app.post("/checkin", authMiddleware, async (req, res) => {
 
     const pins = await prisma.pin.findMany({
       where: { reservationId: reservation.id, used: false, expiresAt: { gt: new Date() } },
-      orderBy: { createdAt: "desc" }, take: 10,
+      orderBy: { createdAt: "desc" },
+      take: 10,
     });
+
     let matched = null;
     for (const p of pins) {
-      if (await bcrypt.compare(String(pin), p.pinHash)) { matched = p; break; }
+      if (await bcrypt.compare(String(pin), p.pinHash)) {
+        matched = p;
+        break;
+      }
     }
     if (!matched) return res.status(401).json({ error: "Invalid PIN" });
 
-    await prisma.$transaction(async tx => {
+    const checkinUserId = bodyUserId ? Number(bodyUserId) : (req.userId || reservation.userId);
+
+    await prisma.$transaction(async (tx) => {
       await tx.pin.update({ where: { id: matched.id }, data: { used: true } });
       await tx.reservation.update({ where: { id: reservation.id }, data: { status: "CHECKED_IN" } });
-      await tx.checkin.create({ data: { reservationId: reservation.id, userId: req.userId } });
+      await tx.checkin.create({ data: { reservationId: reservation.id, userId: Number(checkinUserId) } });
     });
+
     res.json({ message: "체크인 성공" });
-  } catch {
+  } catch (err) {
+    console.error("[CHECKIN] error:", err);
     res.status(500).json({ error: "서버 오류" });
   }
 });
 
-// ---------- 퇴실 ----------
+/* -------------------------------- 퇴실 ---------------------------------- */
 app.post("/checkout", authMiddleware, async (req, res) => {
   try {
     const { reservationId, password } = req.body || {};
     if (!reservationId || !password) return res.status(400).json({ error: "reservationId/password 필수" });
+    if (!req.userId) return res.status(401).json({ error: "인증 필요" });
 
-    const reservation = await prisma.reservation.findUnique({ where: { id: Number(reservationId) }, include: { user: true } });
+    const reservation = await prisma.reservation.findUnique({
+      where: { id: Number(reservationId) },
+      include: { user: true, seat: true },
+    });
     if (!reservation) return res.status(404).json({ error: "예약 없음" });
     if (reservation.userId !== req.userId) return res.status(403).json({ error: "권한 없음" });
 
-    const ok = await bcrypt.compare(password, reservation.user.passwordHash || "");
+    const ok = await bcrypt.compare(String(password), reservation.user.passwordHash || "");
     if (!ok) return res.status(401).json({ error: "비밀번호가 올바르지 않습니다." });
+
+    if (["FINISHED", "CANCELED", "EXPIRED"].includes(reservation.status)) {
+      // 이미 끝난 예약은 그대로 성공 응답
+      return res.json({
+        message: "이미 퇴실 처리된 예약입니다.",
+        reservation: {
+          id: reservation.id,
+          room: reservation.seat?.room ?? null,
+          seat: reservation.seat ? String(reservation.seat.seatNumber) : null,
+          userId: reservation.userId,
+          status: reservation.status,
+          startTime: iso(reservation.startTime),
+          endTime: iso(reservation.endTime),
+          endedAt: iso(reservation.endedAt),
+        },
+      });
+    }
 
     const updated = await prisma.reservation.update({
       where: { id: reservation.id },
       data: { status: "FINISHED", endedAt: new Date() },
-      include: { seat: true, user: true },
+      include: { seat: true },
     });
-    res.json({ message: "Checkout success", reservation: updated });
-  } catch {
+
+    res.json({
+      message: "Checkout success",
+      reservation: {
+        id: updated.id,
+        room: updated.seat?.room ?? null,
+        seat: updated.seat ? String(updated.seat.seatNumber) : null,
+        userId: updated.userId,
+        status: updated.status,
+        startTime: iso(updated.startTime),
+        endTime: iso(updated.endTime),
+        endedAt: iso(updated.endedAt),
+      },
+    });
+  } catch (err) {
+    console.error("[CHECKOUT] error:", err);
     res.status(500).json({ error: "서버 오류" });
   }
 });
 
-// ---------- 자동 상태 업데이트 ----------
+/* ------------------------- 자동 상태 업데이트(잡) ------------------------- */
 async function expireReservationsJob() {
   try {
     const now = new Date();
 
-    // 1. PENDING → 20분 지나면 EXPIRED
-    const result1 = await prisma.reservation.updateMany({
+    // 1) PENDING → 시작 20분 경과 시 EXPIRED
+    const exp1 = await prisma.reservation.updateMany({
       where: {
         status: "PENDING",
-        startTime: { lt: new Date(now.getTime() - 20 * 60 * 1000) }, // 시작 +20분 초과
+        startTime: { lt: new Date(now.getTime() - 20 * 60 * 1000) },
       },
       data: { status: "EXPIRED", endedAt: now },
     });
 
-    // 2. CHECKED_IN → 4시간 지나면 FINISHED
-    const result2 = await prisma.reservation.updateMany({
+    // 2) CHECKED_IN → 체크인 4시간 경과 시 FINISHED
+    const exp2 = await prisma.reservation.updateMany({
       where: {
         status: "CHECKED_IN",
-        checkins: {
-          some: { checkinTime: { lt: new Date(now.getTime() - 4 * 60 * 60 * 1000) } },
-        },
+        checkins: { some: { checkinTime: { lt: new Date(now.getTime() - 4 * 60 * 60 * 1000) } } },
       },
       data: { status: "FINISHED", endedAt: now },
     });
 
-    // 3. 예약 종료시간이 지난데도 여전히 열려있는 경우도 마무리
-    const result3 = await prisma.reservation.updateMany({
+    // 3) 안전망: 예약 종료시간이 지난 예약 정리
+    const exp3 = await prisma.reservation.updateMany({
       where: {
         status: { in: ["PENDING", "CHECKED_IN"] },
         endTime: { lt: now },
@@ -310,22 +419,24 @@ async function expireReservationsJob() {
       data: { status: "EXPIRED", endedAt: now },
     });
 
-    if (result1.count || result2.count || result3.count) {
-      console.log(`[expireJob] expired=${result1.count}, finished=${result2.count}, forced=${result3.count}`);
+    if (exp1.count || exp2.count || exp3.count) {
+      console.log(`[expireJob] expired=${exp1.count}, finished=${exp2.count}, forced=${exp3.count}`);
     }
   } catch (err) {
     console.error("[expireJob] error:", err);
   }
 }
-// ---------- 서버 시작 ----------
+// 1분마다 실행
+setInterval(expireReservationsJob, 60 * 1000);
+
+/* ------------------------------- 서버 시작 -------------------------------- */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => console.log(`🚀 서버 실행 중: http://localhost:${PORT}`));
 
-// ---------- 종료 처리 ----------
+/* ------------------------------ 종료/에러 처리 ---------------------------- */
 process.on("SIGINT", async () => { await prisma.$disconnect(); process.exit(0); });
 process.on("SIGTERM", async () => { await prisma.$disconnect(); process.exit(0); });
 
-// ---------- 에러 핸들러 ----------
 app.use((err, req, res, next) => {
   console.error("[UNCAUGHT ERROR]", err?.stack || err);
   res.status(500).json({ error: "서버 오류" });
