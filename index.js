@@ -65,10 +65,8 @@ function authMiddleware(req, res, next) {
   const token = parts[1];
   try {
     const payload = jwt.verify(token, JWT_SECRET);
-    // payload expected to include { userId, studentId } when token was signed
     req.user = payload;
-    req.userId = Number(payload.userId); // ensure numeric
-    // console.log("[AUTH] token valid, payload:", payload);
+    req.userId = Number(payload.userId);
     return next();
   } catch (err) {
     console.log("[AUTH] token verify failed:", err.message);
@@ -116,7 +114,6 @@ app.post("/signup", async (req, res) => {
         userId: finalUserId,
         passwordHash: hashed,
       },
-      // 가입 응답에 기본 식별자만 내려줌. 프론트는 /me로 추가 정보(이름 등)를 가져가면 됨.
       select: { id: true, userId: true, studentId: true, course: true },
     });
     res.json({ message: "회원가입 성공", user });
@@ -127,7 +124,6 @@ app.post("/signup", async (req, res) => {
   }
 });
 
-// 추천 로그인 핸들러
 app.post("/login", async (req, res) => {
   console.log("[LOGIN] body:", req.body);
   try {
@@ -156,7 +152,6 @@ app.post("/login", async (req, res) => {
 
     const token = jwt.sign({ userId: user.id, studentId: user.studentId }, JWT_SECRET, { expiresIn: "7d" });
 
-    // Return token and user id for convenience. Front should call /me to get full user (incl. name).
     res.json({ message: "로그인 성공", token, userId: user.id });
   } catch (err) {
     console.error("[LOGIN] error:", err && err.stack ? err.stack : err);
@@ -164,7 +159,7 @@ app.post("/login", async (req, res) => {
   }
 });
 
-// current user endpoint (프론트가 토큰으로 사용자 정보 조회할 때 사용)
+// current user
 app.get("/me", authMiddleware, async (req, res) => {
   try {
     if (!req.userId) return res.status(401).json({ error: "토큰 필요" });
@@ -220,7 +215,6 @@ app.get("/seats", async (req, res) => {
 /**
  * GET /reservations
  * optional query: room, userId, status, from, to, limit, offset
- * returns reservations with seat and user included
  */
 app.get('/reservations', authMiddleware, async (req, res) => {
   try {
@@ -228,7 +222,6 @@ app.get('/reservations', authMiddleware, async (req, res) => {
 
     const where = {};
     if (room) {
-      // filter by seat.room
       where.seat = { room: String(room) };
     }
     if (userId) where.userId = Number(userId);
@@ -282,12 +275,11 @@ app.get('/reservations/:id', authMiddleware, async (req, res) => {
 /**
  * 예약 생성
  * body: { seatId, startTime, endTime }
- * 인증: 권장 (토큰) -> token에서 userId 추출하여 사용
- * returns: reservation + (개발용으로 pin 반환하려면 ?dev=1)
+ * 인증: 권장 (토큰) -> token에서 userId 사용
+ * returns: reservation + (?dev=1 이면 devPin 포함)
  */
 app.post("/reservations", authMiddleware, async (req, res) => {
   try {
-    // auth user id 우선 사용, 없으면 body.userId 사용 (호환성)
     const authUserId = req.userId ? Number(req.userId) : (req.body.userId ? Number(req.body.userId) : null);
     if (!authUserId) return res.status(401).json({ error: "인증된 사용자 필요" });
 
@@ -302,12 +294,10 @@ app.post("/reservations", authMiddleware, async (req, res) => {
       return res.status(400).json({ error: "startTime/endTime 불량" });
     }
 
-    // seat 고정석 여부 확인
     const seat = await prisma.seat.findUnique({ where: { id: Number(seatId) } });
     if (!seat) return res.status(404).json({ error: "Seat 없음" });
     if (seat.fixed) return res.status(400).json({ error: "이 좌석은 고정석(예약불가)입니다." });
 
-    // 동일 좌석의 PENDING/CHECKED_IN 예약들 조사 (취소/종료된 건 제외)
     const existing = await prisma.reservation.findMany({
       where: {
         seatId: Number(seatId),
@@ -319,7 +309,6 @@ app.post("/reservations", authMiddleware, async (req, res) => {
       },
     });
 
-    // 허용 규칙: 겹치는 '총 겹친 시간'이 20분 이상이면 충돌로 간주
     const MS20MIN = 20 * 60 * 1000;
     for (const ex of existing) {
       const exStart = new Date(ex.startTime).getTime();
@@ -330,7 +319,6 @@ app.post("/reservations", authMiddleware, async (req, res) => {
       }
     }
 
-    // 예약 생성 + PIN 발급 (트랜잭션)
     const pinPlain = String(Math.floor(100000 + Math.random() * 900000)); // 6자리 숫자
     const pinHash = await bcrypt.hash(pinPlain, 10);
     const pinExpiresAt = new Date(start.getTime() + MS20MIN); // 예약 시작부터 20분 유효
@@ -367,18 +355,15 @@ app.post("/reservations", authMiddleware, async (req, res) => {
 /**
  * 체크인 (PIN 확인)
  * body: { reservationId, pin }
- * 인증: 권장 (토큰) -> token에서 userId를 우선 사용(입실 기록에 사용)
  */
 app.post("/checkin", authMiddleware, async (req, res) => {
   try {
     const { reservationId, pin, userId: bodyUserId } = req.body || {};
     if (!reservationId || !pin) return res.status(400).json({ error: "reservationId/pin 필수" });
 
-    // 예약 존재 확인 (그리고 reservation의 실제 userId 확보)
     const reservation = await prisma.reservation.findUnique({ where: { id: Number(reservationId) } });
     if (!reservation) return res.status(404).json({ error: "해당 예약 없음" });
 
-    // 유효한(사용안된, 만료 안된) PIN 찾기 (reservationId에 속한 최근 PIN들)
     const pins = await prisma.pin.findMany({
       where: { reservationId: Number(reservationId), used: false, expiresAt: { gt: new Date() } },
       orderBy: { createdAt: "desc" },
@@ -386,7 +371,6 @@ app.post("/checkin", authMiddleware, async (req, res) => {
     });
     if (!pins || pins.length === 0) return res.status(400).json({ error: "사용 가능한 PIN 없음(만료되었거나 사용됨)" });
 
-    // PIN 비교
     let matched = null;
     for (const p of pins) {
       const ok = await bcrypt.compare(String(pin), p.pinHash);
@@ -394,8 +378,6 @@ app.post("/checkin", authMiddleware, async (req, res) => {
     }
     if (!matched) return res.status(401).json({ error: "PIN 불일치" });
 
-    // 체크인 처리: 트랜잭션으로 pin.used = true, reservation.status = CHECKED_IN, checkin 레코드 생성
-    // checkin.userId는 요청 바디(bodyUserId)가 있으면 그걸 우선, 없으면 토큰(req.userId) 사용, 없으면 reservation.userId
     const checkinUserId = bodyUserId ? Number(bodyUserId) : (req.userId ? Number(req.userId) : reservation.userId);
 
     const result = await prisma.$transaction(async (tx) => {
@@ -418,20 +400,56 @@ app.post("/checkin", authMiddleware, async (req, res) => {
 });
 
 /**
- * 퇴실 처리 (예약 상태 FINISHED, endedAt 업데이트)
- * body: { reservationId }
- * 인증: 권장
+ * 퇴실 처리 (/checkout)
+ * body: { reservationId, password }
+ * 요구사항:
+ *  - 예약 존재 확인
+ *  - 로그인 유저(token)와 예약 userId 일치 확인
+ *  - password 검증 (User.passwordHash와 비교)
+ *  - 조건 충족 시 status = FINISHED, endedAt = now()
+ * 성공: { "message": "Checkout success", "reservation": { ...updated } }
+ * 실패: { "error": "비밀번호가 올바르지 않습니다." } 등
  */
 app.post("/checkout", authMiddleware, async (req, res) => {
   try {
-    const { reservationId } = req.body || {};
-    if (!reservationId) return res.status(400).json({ error: "reservationId 필수" });
+    const { reservationId, password } = req.body || {};
+    if (!reservationId || !password) {
+      return res.status(400).json({ error: "reservationId와 password를 모두 전달해주세요." });
+    }
+    if (!req.userId) {
+      return res.status(401).json({ error: "인증이 필요합니다." });
+    }
 
-    const r = await prisma.reservation.update({
+    const reservation = await prisma.reservation.findUnique({
       where: { id: Number(reservationId) },
-      data: { status: "FINISHED", endedAt: new Date() },
+      include: { user: true },
     });
-    res.json({ message: "퇴실 처리 완료", reservation: r });
+    if (!reservation) return res.status(404).json({ error: "예약이 존재하지 않습니다." });
+
+    if (reservation.userId !== Number(req.userId)) {
+      return res.status(403).json({ error: "해당 예약에 대한 권한이 없습니다." });
+    }
+
+    const okPassword = await bcrypt.compare(String(password), reservation.user.passwordHash || "");
+    if (!okPassword) {
+      return res.status(401).json({ error: "비밀번호가 올바르지 않습니다." });
+    }
+
+    if (["FINISHED", "CANCELED", "EXPIRED"].includes(reservation.status)) {
+      const existing = await prisma.reservation.findUnique({
+        where: { id: reservation.id },
+        include: { seat: true, user: { select: { id: true, userId: true, name: true, email: true, course: true } } },
+      });
+      return res.json({ message: "이미 퇴실 처리된 예약입니다.", reservation: existing });
+    }
+
+    const updated = await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: { status: "FINISHED", endedAt: new Date() },
+      include: { seat: true, user: { select: { id: true, userId: true, name: true, email: true, course: true } } },
+    });
+
+    return res.json({ message: "Checkout success", reservation: updated });
   } catch (err) {
     console.error("[CHECKOUT] error:", err && err.stack ? err.stack : err);
     res.status(500).json({ error: "서버 오류" });
@@ -457,7 +475,6 @@ app.get("/debug/reservations", async (req, res) => {
 async function expireReservationsJob() {
   try {
     const now = new Date();
-    // PENDING 또는 CHECKED_IN 이지만 endTime 지남 -> EXPIRED (endedAt 기록)
     const result = await prisma.reservation.updateMany({
       where: {
         endTime: { lt: now },
@@ -475,30 +492,24 @@ async function expireReservationsJob() {
     console.error('[expireJob] error:', err && err.stack ? err.stack : err);
   }
 }
-// 개발/테스트: 1분마다 실행. 운영에서는 cron/worker로 옮기세요.
 setInterval(expireReservationsJob, 60 * 1000);
 
 /** -----------------------
  * 정적 파일 서빙 (SPA)
- *  - public/ 디렉터리에 빌드된 프론트 파일을 넣으세요.
- *  - 이 블록은 app.listen 호출 이전에 위치해야 합니다.
  * ---------------------*/
 const publicDir = path.join(__dirname, 'public');
 app.use(express.static(publicDir));
 
-// SPA fallback: API 루트로 보이는 경로들은 건너뛰고, 그 외 GET 요청은 index.html로 응답
-app.get('*', (req, res, next) => {
+// Express v5 호환 SPA fallback: '*' 대신 '/(.*)'
+app.get('/:path*', (req, res, next) => {
   const apiPrefixes = [
     '/signup', '/login', '/me', '/healthz', '/debug',
     '/seats', '/reservations', '/checkin', '/checkout'
   ];
   if (apiPrefixes.some(p => req.path.startsWith(p))) return next();
   if (req.method !== 'GET') return next();
-  // 파일 요청(확장자 있는 경우)은 static handler에 맡김(404 등)
   if (path.extname(req.path)) return next();
-  res.sendFile(path.join(publicDir, 'index.html'), err => {
-    if (err) next(err);
-  });
+  res.sendFile(path.join(publicDir, 'index.html'), err => { if (err) next(err); });
 });
 
 /** LAN 접근 허용 */
