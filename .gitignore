@@ -1,0 +1,22 @@
+# node
+node_modules/
+npm-debug.log*
+pnpm-lock.yaml
+yarn.lock
+package-lock.json
+
+# env
+.env
+.env.local
+.env.*.local
+
+# Prisma client / generated
+node_modules/@prisma/client
+.prisma/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# build / dist
+/public
