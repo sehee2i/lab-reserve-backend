@@ -500,18 +500,17 @@ setInterval(expireReservationsJob, 60 * 1000);
 const publicDir = path.join(__dirname, 'public');
 app.use(express.static(publicDir));
 
-// Express v5 호환 SPA fallback: '*' 대신 '/(.*)'
-app.get('/:path(.*)', (req, res, next) => {
+// SPA fallback (Express v5-safe)
+app.use((req, res, next) => {
   const apiPrefixes = [
     '/signup', '/login', '/me', '/healthz', '/debug',
     '/seats', '/reservations', '/checkin', '/checkout'
   ];
   if (apiPrefixes.some(p => req.path.startsWith(p))) return next();
   if (req.method !== 'GET') return next();
-  if (path.extname(req.path)) return next();
+  if (path.extname(req.path)) return next(); // 정적파일 요청은 패스
   res.sendFile(path.join(publicDir, 'index.html'), err => { if (err) next(err); });
 });
-
 /** LAN 접근 허용 */
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, "0.0.0.0", () => {
