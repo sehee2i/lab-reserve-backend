@@ -501,7 +501,7 @@ const publicDir = path.join(__dirname, 'public');
 app.use(express.static(publicDir));
 
 // Express v5 호환 SPA fallback: '*' 대신 '/(.*)'
-app.get('/:path*', (req, res, next) => {
+app.get('/:path(.*)', (req, res, next) => {
   const apiPrefixes = [
     '/signup', '/login', '/me', '/healthz', '/debug',
     '/seats', '/reservations', '/checkin', '/checkout'
