@@ -1,25 +1,25 @@
 {
-    "name":  "lab-reserve-api",
-    "version":  "1.0.0",
-    "description":  "",
-    "main":  "index.js",
-    "scripts":  {
-                    "start":  "node index.js",
-                    "build:client":  "cd client \u0026\u0026 npm install \u0026\u0026 npm run build || true",
-                    "prepare-static":  "node ./scripts/copy-client-build.js",
-                    "test":  "echo \"Error: no test specified\" \u0026\u0026 exit 1"
-                },
-    "keywords":  [
-
-                 ],
-    "author":  "",
-    "license":  "ISC",
-    "dependencies":  {
-                         "@prisma/client":  "^6.14.0",
-                         "bcrypt":  "^6.0.0",
-                         "cors":  "^2.8.5",
-                         "express":  "^5.1.0",
-                         "jsonwebtoken":  "^9.0.2",
-                         "prisma":  "^6.14.0"
-                     }
+    "name": "lab-reserve-api",
+    "version": "1.0.0",
+    "description": "",
+    "main": "index.js",
+    "scripts": {
+        "start": "node index.js",
+        "build:client": "cd client && npm install && npm run build || true",
+        "prepare-static": "node ./scripts/copy-client-build.js",
+        "test": "echo \"Error: no test specified\" && exit 1"
+    },
+    "keywords": [],
+    "author": "",
+    "license": "ISC",
+    "dependencies": {
+        "@prisma/client": "^6.14.0",
+        "bcrypt": "^6.0.0",
+        "cors": "^2.8.5",
+        "express": "^5.1.0",
+        "jsonwebtoken": "^9.0.2"
+    },
+    "devDependencies": {
+        "prisma": "^6.15.0"
+    }
 }
