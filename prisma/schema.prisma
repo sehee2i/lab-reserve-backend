@@ -1,1 +1,94 @@
-﻿(여기에 스키마 본문 그대로)
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Checkin {
+  id            Int         @id @default(autoincrement())
+  reservationId Int
+  userId        Int
+  checkinTime   DateTime    @default(now())
+  Reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+  User          User        @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model Pin {
+  id            Int         @id @default(autoincrement())
+  reservationId Int
+  pinHash       String
+  createdAt     DateTime    @default(now())
+  expiresAt     DateTime
+  used          Boolean     @default(false)
+  Reservation   Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@index([reservationId])
+}
+
+model Reservation {
+  id        Int               @id @default(autoincrement())
+  seatId    Int
+  userId    Int
+  startTime DateTime
+  endTime   DateTime
+  endedAt   DateTime?
+  status    ReservationStatus @default(PENDING)
+  extended  Boolean           @default(false)
+  createdAt DateTime          @default(now())
+  startedAt DateTime?         @db.Timestamptz(6)
+  pinHash   String?
+  Checkin   Checkin[]
+  Pin       Pin[]
+  Seat      Seat              @relation(fields: [seatId], references: [id], onDelete: Cascade)
+  User      User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([seatId, startTime, endTime])
+  @@index([status, startTime])
+  @@index([userId])
+}
+
+model Seat {
+  id          Int           @id @default(autoincrement())
+  room        String
+  seatNumber  Int
+  label       String?
+  fixed       Boolean       @default(false)
+  Reservation Reservation[]
+
+  @@unique([room, seatNumber])
+  @@index([room])
+}
+
+model User {
+  id           Int           @id @default(autoincrement())
+  studentId    String        @unique
+  passwordHash String
+  name         String?
+  email        String?       @unique
+  course       Course        @default(UNDERGRAD)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime
+  userId       String        @unique
+  Checkin      Checkin[]
+  Reservation  Reservation[]
+}
+
+enum ReservationStatus {
+  PENDING
+  CHECKED_IN
+  EXPIRED
+  CANCELED
+  FINISHED
+}
+
+enum Course {
+  PROFESSOR
+  DOCTOR
+  PHD
+  MASTER
+  UNDERGRAD
+}
