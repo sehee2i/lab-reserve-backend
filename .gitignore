@@ -20,3 +20,4 @@ Thumbs.db
 
 # build / dist
 /public
+prisma/schema.bak.prisma
