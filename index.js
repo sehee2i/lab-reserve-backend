@@ -167,50 +167,45 @@ app.get("/seats", async (req, res) => {
 });
 
 /* -------------------------------- 예약 ----------------------------------- */
-/** 목록: Seat(대문자) 관계를 사용해 room 필터 */
+/** 목록: Seat(대문자) 관계를 사용해 room 필터 + 프론트 요구 필드 포함 */
 app.get("/reservations", async (req, res) => {
   try {
     const { room, userId, status, from, to, limit, offset } = req.query;
-    const roomStr = room ? String(room) : null;
-
-    const where = {
-      ...(roomStr && { Seat: { room: roomStr } }),     // ← seat(x) Seat(o)
-      ...(userId && { userId: Number(userId) }),
-      ...(status && { status: String(status) }),
-      ...((from || to) && {
-        AND: [
-          ...(from ? [{ endTime:   { gte: new Date(String(from)) } }] : []),
-          ...(to   ? [{ startTime: { lte: new Date(String(to)) } }] : []),
-        ],
-      }),
-    };
+    const where = {};
+    if (room) where.Seat = { room: String(room) }; // ← seat(x) Seat(o)
+    if (userId) where.userId = Number(userId);
+    if (status) where.status = String(status);
+    if (from || to) {
+      where.AND = [];
+      if (from) where.AND.push({ endTime: { gte: new Date(String(from)) } });
+      if (to) where.AND.push({ startTime: { lte: new Date(String(to)) } });
+    }
 
     const list = await prisma.reservation.findMany({
       where,
-      include: { Seat: true },                          // ← Seat 관계 포함
+      include: { Seat: true },
       orderBy: { startTime: "asc" },
-      take:  limit  ? Number(limit)  : 200,
-      skip:  offset ? Number(offset) : 0,
+      take: limit ? Number(limit) : 200,
+      skip: offset ? Number(offset) : 0,
     });
 
-    // ✅ 프론트 요구: seatId, createdAt(그리고 seatNumber) 포함
     const formatted = list.map((r) => ({
       id: r.id,
       room: r.Seat?.room ?? null,
-      seatId: r.seatId,                                  // 가장 중요(프론트 매칭)
-      seatNumber: r.Seat?.seatNumber ?? null,            // 편의 정보(백컴패)
-      seat: r.Seat ? String(r.Seat.seatNumber) : null,   // 기존 키 유지
+      seatId: r.seatId,                                // 프론트 매칭 핵심
+      seatNumber: r.Seat?.seatNumber ?? null,          // 참고
+      seat: r.Seat ? String(r.Seat.seatNumber) : null, // 기존 키 유지(안전)
       userId: r.userId,
       status: r.status,
       extended: r.extended,
       startTime: iso(r.startTime),
       endTime: iso(r.endTime),
-      createdAt: iso(r.createdAt),                       // PENDING TTL 계산용
+      createdAt: iso(r.createdAt),                     // PENDING TTL 계산용
     }));
 
     res.json({ count: formatted.length, reservations: formatted });
   } catch (e) {
-    console.error("[/reservations] error:", e);
+    console.error("[RESERVATIONS GET] error:", e);
     res.status(500).json({ error: "서버 오류" });
   }
 });
@@ -236,24 +231,23 @@ app.post("/reservations", authMiddleware, async (req, res) => {
     if (!seat) return res.status(404).json({ error: "Seat 없음" });
     if (seat.fixed) return res.status(400).json({ error: "이 좌석은 고정석(예약불가)입니다." });
 
-    // 간단 겹침 검사(20분 이상 겹치면 불가)
+    // 겹침 검사: CHECKED_IN 또는 (PENDING 이면서 생성 20분 내)만 "차단"
     const MS20 = 20 * 60 * 1000;
-    const exist = await prisma.reservation.findMany({
+    const pendingCutoff = new Date(Date.now() - MS20);
+    const blocking = await prisma.reservation.findFirst({
       where: {
         seatId: Number(seatId),
-        status: { in: ["PENDING", "CHECKED_IN"] },
-        AND: [{ startTime: { lt: end } }, { endTime: { gt: start } }],
+        startTime: { lt: end },
+        endTime: { gt: start },
+        OR: [
+          { status: "CHECKED_IN" },
+          { status: "PENDING", createdAt: { gte: pendingCutoff } },
+        ],
       },
+      select: { id: true },
     });
-    for (const ex of exist) {
-      const overlapMs = Math.max(
-        0,
-        Math.min(new Date(ex.endTime).getTime(), end.getTime()) -
-          Math.max(new Date(ex.startTime).getTime(), start.getTime())
-      );
-      if (overlapMs >= MS20) {
-        return res.status(409).json({ error: "해당 시간대에 이미 예약이 있어 겹침(20분 이상)으로 예약 불가" });
-      }
+    if (blocking) {
+      return res.status(409).json({ error: "해당 시간대에 이미 예약이 있어 겹침(입실중 또는 20분 내 대기)으로 예약 불가" });
     }
 
     const pinPlain = String(Math.floor(100000 + Math.random() * 900000));
@@ -292,7 +286,7 @@ app.post("/reservations", authMiddleware, async (req, res) => {
 
     const resp = { message: "예약 생성됨", reservation: reservationForClient };
     const dev = req.query.dev === "1" || req.query.dev === "true";
-    if (dev) resp.devPin = pinPlain; // ← 테스트 편의
+    if (dev) resp.devPin = pinPlain; // 테스트용 PIN 노출
 
     res.status(201).json(resp);
   } catch (err) {
@@ -361,6 +355,83 @@ app.post("/checkin", authMiddleware, async (req, res) => {
     });
   } catch (err) {
     console.error("[CHECKIN] error:", err);
+    res.status(500).json({ error: "서버 오류" });
+  }
+});
+
+/* -------------------------------- 연장 ---------------------------------- */
+/**
+ * POST /reservations/:id/extend
+ * - 본인 예약만
+ * - 종료 20분 전 ~ 종료 사이에서만 허용
+ * - 최대 3시간 상한
+ * - 다음 차단 예약(CHECKED_IN 또는 TTL 내 PENDING) 시작 전까지만
+ * - endTime 갱신 + extended: true
+ */
+app.post("/reservations/:id/extend", authMiddleware, async (req, res) => {
+  try {
+    if (!req.userId) return res.status(401).json({ error: "인증 필요" });
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "예약 ID 오류" });
+
+    const r = await prisma.reservation.findUnique({
+      where: { id },
+      include: { Seat: true },
+    });
+    if (!r) return res.status(404).json({ error: "예약 없음" });
+    if (r.userId !== req.userId) return res.status(403).json({ error: "권한 없음" });
+
+    const now = new Date();
+    const MS20 = 20 * 60 * 1000;
+    const MAX_EXT_MS = 3 * 60 * 60 * 1000;
+
+    // 종료 20분 전 ~ 종료 사이
+    if (!(now.getTime() >= r.endTime.getTime() - MS20 && now.getTime() <= r.endTime.getTime())) {
+      return res.status(400).json({ error: "연장은 종료 20분 전부터 종료 시각까지 가능합니다." });
+    }
+
+    // 다음 차단 예약의 시작 전까지만
+    const pendingCutoff = new Date(Date.now() - MS20);
+    const nextBlocking = await prisma.reservation.findFirst({
+      where: {
+        seatId: r.seatId,
+        startTime: { gt: r.endTime },
+        OR: [
+          { status: "CHECKED_IN" },
+          { status: "PENDING", createdAt: { gte: pendingCutoff } },
+        ],
+      },
+      orderBy: { startTime: "asc" },
+      select: { startTime: true },
+    });
+
+    const upperBound = nextBlocking ? nextBlocking.startTime : new Date(r.startTime.getTime() + MAX_EXT_MS);
+    const newEnd = new Date(Math.min(upperBound.getTime() - 1, r.startTime.getTime() + MAX_EXT_MS));
+    if (newEnd.getTime() <= r.endTime.getTime()) {
+      return res.status(409).json({ error: "연장 가능한 시간이 없습니다." });
+    }
+
+    const updated = await prisma.reservation.update({
+      where: { id: r.id },
+      data: { endTime: newEnd, extended: true },
+      include: { Seat: true },
+    });
+
+    res.json({
+      message: "연장 완료",
+      reservation: {
+        id: updated.id,
+        room: updated.Seat?.room ?? null,
+        seat: updated.Seat ? String(updated.Seat.seatNumber) : null,
+        userId: updated.userId,
+        status: updated.status,
+        startTime: iso(updated.startTime),
+        endTime: iso(updated.endTime),
+        extended: updated.extended,
+      },
+    });
+  } catch (err) {
+    console.error("[EXTEND] error:", err);
     res.status(500).json({ error: "서버 오류" });
   }
 });
@@ -437,7 +508,7 @@ async function expireReservationsJob() {
       data: { status: "EXPIRED", endedAt: now },
     });
 
-    // 2) CHECKED_IN → 체크인 시간으로부터 4시간 경과하면 FINISHED
+    // 2) CHECKED_IN → 체크인 4시간 경과하면 FINISHED
     const exp2 = await prisma.reservation.updateMany({
       where: {
         status: "CHECKED_IN",
@@ -446,7 +517,7 @@ async function expireReservationsJob() {
       data: { status: "FINISHED", endedAt: now },
     });
 
-    // 3) 예약 종료시간이 지났다면 정리
+    // 3) 예약 종료시간 경과 정리
     const exp3 = await prisma.reservation.updateMany({
       where: {
         status: { in: ["PENDING", "CHECKED_IN"] },
