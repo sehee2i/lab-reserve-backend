@@ -1,4 +1,4 @@
-// index.js
+// index.js (완전 대체본 — 기존 파일 덮어쓰기 가능)
 const express = require("express");
 const { PrismaClient } = require("@prisma/client");
 const bcrypt = require("bcrypt");
@@ -72,7 +72,7 @@ function authMiddleware(req, res, next) {
     const payload = jwt.verify(parts[1], JWT_SECRET);
     req.user = payload;
     req.userId = Number(payload.userId);
-  } catch {
+  } catch (e) {
     req.user = null;
     req.userId = null;
   }
@@ -166,53 +166,65 @@ app.get("/seats", async (req, res) => {
   res.json({ count: seats.length, seats });
 });
 
+/* ------------------------- 설정 상수 (TTL/제한값) ------------------------- */
+const PENDING_TTL_MIN = 20; // PENDING 생성 후 20분 지나면 만료로 간주(재예약 허용)
+const MAX_RESERVATION_HOURS = 3; // 예약(연장 포함) 최대 길이(시작부터)
+
 /* -------------------------------- 예약 ----------------------------------- */
+/* GET /reservations (unchanged signature) */
 app.get("/reservations", async (req, res) => {
-  const { room, userId, status, from, to, limit, offset } = req.query;
+  try {
+    const { room, userId, status, from, to, limit, offset } = req.query;
 
-  const where = {};
-  if (room) where.seat = { room: String(room) }; // note: we only filter by seat.room
-  if (userId) where.userId = Number(userId);
-  if (status) where.status = String(status);
-  if (from || to) {
-    where.AND = [];
-    if (from) where.AND.push({ endTime: { gte: new Date(String(from)) } });
-    if (to) where.AND.push({ startTime: { lte: new Date(String(to)) } });
+    const where = {};
+    if (room) where.seat = { room: String(room) }; // note: filter by Seat.room
+    if (userId) where.userId = Number(userId);
+    if (status) where.status = String(status);
+    if (from || to) {
+      where.AND = [];
+      if (from) where.AND.push({ endTime: { gte: new Date(String(from)) } });
+      if (to) where.AND.push({ startTime: { lte: new Date(String(to)) } });
+    }
+
+    const list = await prisma.reservation.findMany({
+      where,
+      include: { Seat: true },
+      orderBy: { startTime: "asc" },
+      take: limit ? Number(limit) : 200,
+      skip: offset ? Number(offset) : 0,
+    });
+
+    const formatted = list.map((r) => ({
+      id: r.id,
+      room: r.Seat?.room ?? null,
+      seat: r.Seat ? String(r.Seat.seatNumber) : null,
+      userId: r.userId,
+      status: r.status,
+      extended: r.extended, // include extended flag
+      startTime: iso(r.startTime),
+      endTime: iso(r.endTime),
+    }));
+    res.json({ count: formatted.length, reservations: formatted });
+  } catch (err) {
+    console.error("[RESERVATIONS GET] error:", err);
+    res.status(500).json({ error: "서버 오류" });
   }
-
-  const list = await prisma.reservation.findMany({
-    where,
-    include: { Seat: true },
-    orderBy: { startTime: "asc" },
-    take: limit ? Number(limit) : 200,
-    skip: offset ? Number(offset) : 0,
-  });
-
-  const formatted = list.map((r) => ({
-    id: r.id,
-    room: r.Seat?.room ?? null,
-    seat: r.Seat ? String(r.Seat.seatNumber) : null,
-    userId: r.userId,
-    status: r.status,
-    startTime: iso(r.startTime),
-    endTime: iso(r.endTime),
-  }));
-  res.json({ count: formatted.length, reservations: formatted });
 });
 
-// 예약 + PIN 발급
+/* POST /reservations : 예약 생성 (기존 로직 유지 + 겹침 검사 개선) */
 app.post("/reservations", authMiddleware, async (req, res) => {
   try {
     const authUserId = req.userId || req.body.userId;
     if (!authUserId) return res.status(401).json({ error: "인증된 사용자 필요" });
 
-    const { seatId, startTime, endTime } = req.body || {};
-    if (!seatId || !startTime || !endTime) {
+    const { seatId: rawSeatId, startTime: rawStart, endTime: rawEnd } = req.body || {};
+    if (!rawSeatId || !rawStart || !rawEnd) {
       return res.status(400).json({ error: "seatId/startTime/endTime 필수" });
     }
 
-    const start = new Date(startTime);
-    const end = new Date(endTime);
+    const seatId = Number(rawSeatId);
+    const start = new Date(rawStart);
+    const end = new Date(rawEnd);
     if (isNaN(start) || isNaN(end) || start >= end) {
       return res.status(400).json({ error: "시간 형식 불량" });
     }
@@ -221,25 +233,35 @@ app.post("/reservations", authMiddleware, async (req, res) => {
     if (!seat) return res.status(404).json({ error: "Seat 없음" });
     if (seat.fixed) return res.status(400).json({ error: "이 좌석은 고정석(예약불가)입니다." });
 
-    const MS20 = 20 * 60 * 1000;
-    const exist = await prisma.reservation.findMany({
-      where: {
-        seatId: Number(seatId),
-        status: { in: ["PENDING", "CHECKED_IN"] },
-        AND: [{ startTime: { lt: end } }, { endTime: { gt: start } }],
-      },
+    // --- PENDING TTL 처리: 오래된 PENDING은 만료로 정리(선택적 최적화)
+    const pendingCutoff = new Date(Date.now() - PENDING_TTL_MIN * 60 * 1000);
+    await prisma.reservation.updateMany({
+      where: { status: "PENDING", createdAt: { lt: pendingCutoff } },
+      data: { status: "EXPIRED" },
     });
-    for (const ex of exist) {
-      const overlapMs = Math.max(
-        0,
-        Math.min(new Date(ex.endTime).getTime(), end.getTime()) -
-          Math.max(new Date(ex.startTime).getTime(), start.getTime())
-      );
-      if (overlapMs >= MS20) {
-        return res.status(409).json({ error: "해당 시간대에 이미 예약이 있어 겹침(20분 이상)으로 예약 불가" });
-      }
+
+    // --- 겹침 검사: CHECKED_IN 또는 (PENDING && createdAt within TTL)
+    const blocking = await prisma.reservation.findFirst({
+      where: {
+        seatId,
+        startTime: { lt: end }, // [start, end) 겹침 판정
+        endTime: { gt: start },
+        OR: [
+          { status: "CHECKED_IN" },
+          { status: "PENDING", createdAt: { gte: pendingCutoff } },
+        ],
+      },
+      select: { id: true, status: true, createdAt: true },
+    });
+
+    if (blocking) {
+      return res.status(409).json({
+        error: "해당 시간대에 이미 예약이 있어 겹침(입실중 또는 20분 내 대기)으로 예약 불가",
+      });
     }
 
+    // --- 생성 및 PIN 발급 (원래 로직 유지)
+    const MS20 = 20 * 60 * 1000;
     const pinPlain = String(Math.floor(100000 + Math.random() * 900000));
     const pinHash = await bcrypt.hash(pinPlain, 10);
     const pinExpiresAt = new Date(start.getTime() + MS20);
@@ -281,6 +303,96 @@ app.post("/reservations", authMiddleware, async (req, res) => {
     res.status(201).json(resp);
   } catch (err) {
     console.error("[RESERVE] error:", err);
+    res.status(500).json({ error: "서버 오류" });
+  }
+});
+
+/* --------------------------------- 연장 ---------------------------------- */
+/*
+  POST /reservations/:id/extend
+  - 인증된 본인 예약만
+  - 예약 상태가 CHECKED_IN 이어야 함 (입실된 사람만 연장 가능)
+  - 연장 허용 시간: (endTime - 20m) <= now <= endTime
+  - 연장 한도: 시작시간으로부터 최대 3시간, 그리고 다음 예약 시작 직전까지
+*/
+app.post("/reservations/:id/extend", authMiddleware, async (req, res) => {
+  try {
+    if (!req.userId) return res.status(401).json({ error: "토큰 필요" });
+
+    const id = Number(req.params.id);
+    if (!id) return res.status(400).json({ error: "유효한 예약 id 필요" });
+
+    const reservation = await prisma.reservation.findUnique({
+      where: { id },
+      include: { Seat: true },
+    });
+    if (!reservation) return res.status(404).json({ error: "예약 없음" });
+
+    if (reservation.userId !== req.userId) return res.status(403).json({ error: "권한 없음" });
+
+    if (reservation.status !== "CHECKED_IN") {
+      return res.status(400).json({ error: "체크인된 예약만 연장 가능합니다." });
+    }
+
+    const now = new Date();
+    const endTime = new Date(reservation.endTime);
+    const startTime = new Date(reservation.startTime);
+
+    // 허용 윈도우: 종료 20분 전 ~ 종료 사이
+    const earliest = new Date(endTime.getTime() - PENDING_TTL_MIN * 60 * 1000); // end - 20min
+    if (now < earliest || now > endTime) {
+      return res.status(400).json({ error: "연장은 종료 20분 전부터 종료 시까지 가능합니다." });
+    }
+
+    // max by 3 hours from start
+    const maxBy3h = new Date(startTime.getTime() + MAX_RESERVATION_HOURS * 60 * 60 * 1000);
+
+    // 다음 예약(같은 좌석) 확인 — startTime > current end, 상태는 PENDING 또는 CHECKED_IN
+    const nextRes = await prisma.reservation.findFirst({
+      where: {
+        seatId: reservation.seatId,
+        startTime: { gt: reservation.endTime },
+        status: { in: ["PENDING", "CHECKED_IN"] },
+      },
+      orderBy: { startTime: "asc" },
+      select: { id: true, startTime: true, status: true },
+    });
+
+    let maxByNext = maxBy3h;
+    if (nextRes && nextRes.startTime) {
+      // next 시작 바로 직전까지만 허용(1ms 전)
+      const nextStart = new Date(nextRes.startTime);
+      maxByNext = new Date(Math.min(maxBy3h.getTime(), nextStart.getTime() - 1));
+    }
+
+    if (maxByNext.getTime() <= endTime.getTime()) {
+      return res.status(400).json({ error: "연장 가능한 여유 시간이 없습니다 (다음 예약과 충돌)." });
+    }
+
+    // Update reservation endTime and mark extended true
+    const updated = await prisma.reservation.update({
+      where: { id: reservation.id },
+      data: {
+        endTime: maxByNext,
+        extended: true,
+      },
+      include: { Seat: true },
+    });
+
+    return res.json({
+      message: "연장 성공",
+      reservation: {
+        id: updated.id,
+        room: updated.Seat?.room ?? null,
+        seat: updated.Seat ? String(updated.Seat.seatNumber) : null,
+        startTime: iso(updated.startTime),
+        endTime: iso(updated.endTime),
+        extended: updated.extended,
+        status: updated.status,
+      },
+    });
+  } catch (err) {
+    console.error("[EXTEND] error:", err);
     res.status(500).json({ error: "서버 오류" });
   }
 });
@@ -408,11 +520,18 @@ async function expireReservationsJob() {
   try {
     const now = new Date();
 
-    // 1) PENDING → start+20min 지나면 EXPIRED
+    // 0) 오래된 PENDING(생성시간 기준) -> EXPIRED (PENDING TTL)
+    const pendingCutoff = new Date(Date.now() - PENDING_TTL_MIN * 60 * 1000);
+    const oldPending = await prisma.reservation.updateMany({
+      where: { status: "PENDING", createdAt: { lt: pendingCutoff } },
+      data: { status: "EXPIRED", endedAt: now },
+    });
+
+    // 1) PENDING → start+20min 지나면 EXPIRED (원래의 안전망)
     const exp1 = await prisma.reservation.updateMany({
       where: {
         status: "PENDING",
-        startTime: { lt: new Date(now.getTime() - 20 * 60 * 1000) },
+        startTime: { lt: new Date(now.getTime() - PENDING_TTL_MIN * 60 * 1000) },
       },
       data: { status: "EXPIRED", endedAt: now },
     });
@@ -435,8 +554,10 @@ async function expireReservationsJob() {
       data: { status: "EXPIRED", endedAt: now },
     });
 
-    if (exp1.count || exp2.count || exp3.count) {
-      console.log(`[expireJob] expired=${exp1.count}, finished=${exp2.count}, forced=${exp3.count}`);
+    if (oldPending.count || exp1.count || exp2.count || exp3.count) {
+      console.log(
+        `[expireJob] oldPending=${oldPending.count}, expiredByStart=${exp1.count}, finished=${exp2.count}, forced=${exp3.count}`
+      );
     }
   } catch (err) {
     console.error("[expireJob] error:", err);
