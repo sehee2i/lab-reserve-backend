@@ -45,3 +45,5 @@ BEGIN
       ADD CONSTRAINT checkin_user_fk FOREIGN KEY ("userId") REFERENCES "User"(id) ON DELETE CASCADE;
   END IF;
 END$$;
+
+

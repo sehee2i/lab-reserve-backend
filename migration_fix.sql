@@ -1,0 +1,2 @@
+ALTER TABLE public."Reservation"
+  ADD COLUMN IF NOT EXISTS "updatedAt" TIMESTAMPTZ DEFAULT now() NOT NULL;
